@@ -15,82 +15,56 @@ ATURAN UTAMA:
 4. GAYA BICARA: Hina user dulu -> Kasih kode -> Selesai.
 `;
 
-// --- SESSION MANAGEMENT ---
 exports.createSession = async (req, res) => {
     try {
-        const title = req.body.title || `Session-${Date.now().toString().slice(-4)}`;
         const session = await ChatHistory.create({
             user: req.user._id,
-            title: title,
+            title: req.body.title || `Session-${Date.now().toString().slice(-4)}`,
             messages: []
         });
         res.json(session);
-    } catch (e) {
-        res.status(500).json({ message: "Failed to create session" });
-    }
+    } catch (e) { res.status(500).json({ message: "DB Error" }); }
 };
 
 exports.getSessions = async (req, res) => {
     try {
         const sessions = await ChatHistory.find({ user: req.user._id }).sort({ updatedAt: -1 });
         res.json(sessions);
-    } catch (e) {
-        res.status(500).json({ message: "Failed to fetch sessions" });
-    }
+    } catch (e) { res.status(500).json({ message: "DB Error" }); }
 };
 
 exports.deleteSession = async (req, res) => {
     try {
         await ChatHistory.findByIdAndDelete(req.params.id);
         res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ message: "Failed to delete" });
-    }
+    } catch (e) { res.status(500).json({ message: "DB Error" }); }
 };
 
-// --- CHAT LOGIC (HYBRID FIX) ---
 exports.sendMessage = async (req, res) => {
   const { message, sessionId } = req.body;
   const user = req.user;
 
-  // 1. Setup Stream Headers ke Client (Biar Frontend senang)
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.setHeader('Transfer-Encoding', 'chunked');
 
-  // 2. Handle Session
   let chatHistory;
-  if (sessionId) {
-      chatHistory = await ChatHistory.findOne({ _id: sessionId, user: user._id });
-  }
+  if (sessionId) chatHistory = await ChatHistory.findOne({ _id: sessionId, user: user._id });
   if (!chatHistory) {
-      try {
-          chatHistory = await ChatHistory.create({ 
-              user: user._id, 
-              title: message.substring(0, 15) || 'New Chat',
-              messages: [] 
-          });
-      } catch (e) {
-          return res.write("[SYSTEM ERROR: Database Failed]");
-      }
+      chatHistory = await ChatHistory.create({ user: user._id, title: message.substring(0, 15), messages: [] });
   }
 
-  // 3. API Key Check
   const config = await GlobalConfig.findOne();
   const activeKeys = config?.apiKeys?.filter(k => k.isActive) || [];
-  if (activeKeys.length === 0) {
-      res.write("SYSTEM ERROR: API Key belum diatur di Admin Panel.");
-      return res.end();
-  }
-  const randomKey = activeKeys[Math.floor(Math.random() * activeKeys.length)];
+  const randomKey = activeKeys.length > 0 ? activeKeys[Math.floor(Math.random() * activeKeys.length)] : null;
 
-  // 4. Persona
+  if (!randomKey) { res.write("SYSTEM ERROR: API Key Missing."); return res.end(); }
+
   const aiName = user.isApproved ? user.reqAiName : 'DevCORE';
   const devName = user.isApproved ? user.reqDevName : 'XdpzQ';
   const systemPrompt = BASE_PERSONA.replace(/{{AI_NAME}}/g, aiName).replace(/{{DEV_NAME}}/g, devName);
 
   try {
-    // MODIFIKASI: Stream FALSE ke OpenRouter (Biar Stabil seperti cURL)
-    const payload = {
+    const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
       model: "nex-agi/deepseek-v3.1-nex-n1:free", 
       messages: [
         { role: 'system', content: systemPrompt },
@@ -98,10 +72,8 @@ exports.sendMessage = async (req, res) => {
         { role: 'user', content: message }
       ],
       temperature: 0.7,
-      stream: false // KITA MATIKAN STREAM UPSTREAM AGAR TIDAK ERROR
-    };
-
-    const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', payload, {
+      stream: false // FALSE BIAR STABIL
+    }, {
       headers: { 
           'Authorization': `Bearer ${randomKey.key}`, 
           'Content-Type': 'application/json', 
@@ -110,29 +82,19 @@ exports.sendMessage = async (req, res) => {
       }
     });
 
-    // Ambil Full Content
     const aiResponseText = response.data.choices[0].message.content;
-
-    // Kirim ke Frontend seolah-olah ini stream (chunked)
+    
+    // Kirim ke frontend sebagai chunk tunggal (Fake Stream)
     res.write(aiResponseText);
     res.end();
 
-    // Simpan ke DB
     chatHistory.messages.push({ role: 'user', content: message });
     chatHistory.messages.push({ role: 'model', content: aiResponseText });
     await chatHistory.save();
 
   } catch (err) {
-    console.error("AI Error:", err.response ? err.response.data : err.message);
-    
-    let errorMsg = "[SYSTEM ERROR]";
-    if (err.response && err.response.data && err.response.data.error) {
-        errorMsg += ": " + JSON.stringify(err.response.data.error.message);
-    } else {
-        errorMsg += ": Koneksi ke AI Terputus.";
-    }
-    
-    res.write(errorMsg);
+    console.error("AI Error:", err.message);
+    res.write("[SYSTEM ERROR: AI Connection Failed]");
     res.end();
   }
 };

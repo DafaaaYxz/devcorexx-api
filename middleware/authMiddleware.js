@@ -9,11 +9,15 @@ const protect = async (req, res, next) => {
       
       const user = await User.findById(decoded.id).select('-password');
       
-      if (!user) {
-          return res.status(401).json({ message: 'User not found' });
+      if (!user) return res.status(401).json({ message: 'User not found' });
+
+      // CEK HEALTH (BANNED SYSTEM)
+      // Admin kebal banned
+      if (user.healthPoints <= 0 && user.role !== 'admin') {
+          return res.status(403).json({ message: 'ACCOUNT_BANNED' });
       }
 
-      // FITUR NO. 5: FORCE LOGOUT TARGET
+      // CEK FORCE LOGOUT
       if (user.forceLogout) {
           return res.status(401).json({ message: 'SESSION_TERMINATED_BY_ADMIN' });
       }

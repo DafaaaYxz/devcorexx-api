@@ -1,7 +1,7 @@
 const User = require('../models/user');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const crypto = require('crypto'); // Untuk random key
+const crypto = require('crypto');
 
 const generateToken = (id) => jwt.sign({ id }, 'DEVCORE_SECRET', { expiresIn: '30d' });
 
@@ -14,7 +14,6 @@ exports.registerUser = async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
     
-    // Auto generate avatar seed
     const avatarUrl = `https://api.dicebear.com/7.x/avataaars/svg?seed=${username}`;
 
     const user = await User.create({
@@ -34,6 +33,11 @@ exports.loginUser = async (req, res) => {
   try {
     const user = await User.findOne({ username });
     if (user && (await bcrypt.compare(password, user.password))) {
+        
+      // UPDATE LAST LOGIN
+      user.lastLogin = new Date();
+      await user.save();
+
       res.json({
         _id: user._id,
         username: user.username,
@@ -42,6 +46,11 @@ exports.loginUser = async (req, res) => {
         devName: user.isApproved ? user.reqDevName : 'XdpzQ',
         avatarUrl: user.avatarUrl || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.username}`,
         personalApiKey: user.personalApiKey,
+        // Send Stats
+        apiReqCount: user.apiReqCount,
+        tokenUsage: user.tokenUsage,
+        lastLogin: user.lastLogin,
+        healthStatus: user.healthStatus,
         token: generateToken(user._id)
       });
     } else {
@@ -53,15 +62,21 @@ exports.loginUser = async (req, res) => {
 exports.getMe = async (req, res) => {
     const user = await User.findById(req.user._id).select('-password');
     if(user) {
-        // Ensure avatar exists
         if(!user.avatarUrl) user.avatarUrl = `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.username}`;
-        res.json(user);
+        
+        // Return object lengkap dengan stats
+        res.json({
+            ...user._doc, // Spread mongoose document
+            lastLogin: user.lastLogin,
+            apiReqCount: user.apiReqCount || 0,
+            tokenUsage: user.tokenUsage || 0,
+            healthStatus: user.healthStatus || '100% (HEALTHY)'
+        });
     } else {
         res.status(404).json({ message: 'User not found' });
     }
 };
 
-// --- FITUR BARU: UBAH PASSWORD ---
 exports.changePassword = async (req, res) => {
     const { oldPassword, newPassword } = req.body;
     const user = await User.findById(req.user._id);
@@ -76,10 +91,8 @@ exports.changePassword = async (req, res) => {
     }
 };
 
-// --- FITUR BARU: GENERATE API KEY USER ---
 exports.generateUserApiKey = async (req, res) => {
     const user = await User.findById(req.user._id);
-    // Format: dv-xxxxxxxxxxxx
     const newKey = 'dv-' + crypto.randomBytes(16).toString('hex');
     user.personalApiKey = newKey;
     await user.save();
